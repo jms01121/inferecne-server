@@ -1,0 +1,357 @@
+# llama.cpp 를 LLGuidance(구조화 출력) 포함으로 빌드해 Windows x64 배포 zip 을 만든다.
+#
+# 공식 릴리스 zip 에는 LLGuidance 가 없다 (LLAMA_LLGUIDANCE 기본 OFF).
+# LLGuidance 는 Rust 정적 라이브러리로 llama-common -> 실행파일(exe) 에 링크되므로
+# 백엔드 DLL 만 교체하는 방식으로는 넣을 수 없고, 실행파일을 새로 빌드해야 한다.
+#
+# 산출물 (llama_version = v0.1.2 인 경우):
+#   llama-v0.1.2-bin-win-cuda-12.4-x64.zip   + cudart-llama-bin-win-cuda-12.4-x64.zip
+#   llama-v0.1.2-bin-win-cuda-13.3-x64.zip   + cudart-llama-bin-win-cuda-13.3-x64.zip
+#   llama-v0.1.2-bin-win-vulkan-x64.zip
+
+name: Build llama.cpp (LLGuidance)
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_version:
+        description: "llama.cpp 릴리스 태그 (예: v0.1.2). b10485 같은 nightly 태그나 커밋 SHA 도 가능"
+        required: true
+        default: "v0.1.2"
+        type: string
+      targets:
+        description: "무엇을 빌드할지"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - cuda-12.4
+          - cuda-13.3
+          - vulkan
+      create_release:
+        description: "이 리포지토리에 GitHub Release 를 만들고 zip 을 첨부"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  LLAMA_REPO: "https://github.com/ggml-org/llama.cpp.git"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 버전 이름과 빌드 대상을 결정한다.
+  # llama.cpp 는 같은 커밋에 v0.1.2(버전 태그) 와 b10485(nightly 태그) 를 함께 붙인다.
+  # 배포물 이름에는 v<x.y.z> 를 우선 쓰고, 없으면 b<커밋수> 로 폴백한다.
+  # --------------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version:     ${{ steps.v.outputs.version }}
+      commit:      ${{ steps.v.outputs.commit }}
+      nightly:     ${{ steps.v.outputs.nightly }}
+      cuda_matrix: ${{ steps.m.outputs.cuda }}
+      do_vulkan:   ${{ steps.m.outputs.vulkan }}
+    steps:
+      - name: Resolve llama.cpp version
+        id: v
+        run: |
+          set -euo pipefail
+          # blob 없이 전체 커밋 히스토리만 받는다 (rev-list --count 가 정확해야 함)
+          git clone --filter=blob:none --no-checkout "$LLAMA_REPO" src
+          cd src
+          git fetch --tags --force
+          REF="${{ inputs.llama_version }}"
+          if ! SHA="$(git rev-parse -q --verify "${REF}^{commit}")"; then
+            echo "::error::llama.cpp 에서 '${REF}' 를 찾을 수 없습니다"
+            exit 1
+          fi
+          COUNT="$(git rev-list --count "$SHA")"
+          SHORT="$(git rev-parse --short "$SHA")"
+          # HEAD 를 가리키는 시맨틱 버전 태그 우선
+          VERSION="$(git tag --points-at "$SHA" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+          if [ -z "$VERSION" ]; then
+            VERSION="b${COUNT}"
+            echo "::warning::v<x.y.z> 태그가 없어 nightly 이름으로 폴백합니다: ${VERSION}"
+          fi
+          NIGHTLY="$(git tag --points-at "$SHA" | grep -E '^b[0-9]+$' | head -n1 || true)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "commit=${SHORT}"    >> "$GITHUB_OUTPUT"
+          echo "nightly=${NIGHTLY}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### llama.cpp ${VERSION}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| 요청한 ref | \`${REF}\` |"
+            echo "| 커밋 | \`${SHORT}\` |"
+            echo "| 빌드 번호 | \`${COUNT}\` |"
+            echo "| 업스트림 nightly | \`${NIGHTLY:-없음}\` |"
+            echo "| 패키지 이름 | \`llama-${VERSION}-bin-win-...\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Resolve build targets
+        id: m
+        run: |
+          set -euo pipefail
+          case "${{ inputs.targets }}" in
+            all)        CUDA='["12.4","13.3"]'; VULKAN=true  ;;
+            cuda-12.4)  CUDA='["12.4"]';        VULKAN=false ;;
+            cuda-13.3)  CUDA='["13.3"]';        VULKAN=false ;;
+            vulkan)     CUDA='[]';              VULKAN=true  ;;
+            *) echo "::error::알 수 없는 targets"; exit 1 ;;
+          esac
+          echo "cuda=${CUDA}"     >> "$GITHUB_OUTPUT"
+          echo "vulkan=${VULKAN}" >> "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------------------
+  # nVidia GPU 용
+  # --------------------------------------------------------------------------
+  windows-cuda:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.cuda_matrix != '[]' }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: ${{ fromJson(needs.resolve.outputs.cuda_matrix) }}
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Clone llama.cpp ${{ inputs.llama_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # build-info 가 git 메타데이터에서 build number/commit 을 읽으므로 .git 이 필요하다.
+          # blob 필터로 받아 전체 히스토리는 유지하면서 클론 시간을 줄인다.
+          git clone --filter=blob:none "$LLAMA_REPO" llama.cpp
+          cd llama.cpp
+          git fetch --tags --force
+          git checkout --detach "${{ inputs.llama_version }}"
+          git log -1 --format='%H %s'
+
+      - name: Setup Node.js (llama-server 웹 UI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install CUDA Toolkit ${{ matrix.cuda }}
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: ${{ matrix.cuda }}
+          cuda_arch: x64
+
+      - name: Install Rust (LLGuidance 필수)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Build
+        shell: cmd
+        working-directory: llama.cpp
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          rem CUDA 12.4 는 CCCL 3.2 를 따로 받아야 한다 (13.x 는 불필요)
+          set "CUB_OPT="
+          if "${{ matrix.cuda }}"=="12.4" set "CUB_OPT=-DGGML_CUDA_CUB_3DOT2=ON"
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DLLAMA_LLGUIDANCE=ON ^
+            -DLLAMA_BUILD_IS_DEV=OFF ^
+            -DGGML_CUDA=ON %CUB_OPT% ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_CPU_ALL_VARIANTS=ON ^
+            -DGGML_RPC=ON ^
+            -DLLAMA_BUILD_TOOLS=ON ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_BUILD_EXAMPLES=OFF ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_BORINGSSL=ON
+          if errorlevel 1 exit /b 1
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Verify LLGuidance and release version
+        shell: pwsh
+        working-directory: llama.cpp
+        run: |
+          if (-not (Test-Path "build\llguidance\source\target\release\llguidance.lib")) {
+            throw "llguidance.lib 없음 - LLAMA_LLGUIDANCE 가 적용되지 않았습니다"
+          }
+          $v = (& .\build\bin\Release\llama-cli.exe --version 2>&1 | Select-String '^version:').ToString()
+          Write-Host $v
+          if ($v -match '-dev')     { throw "버전에 -dev 가 붙음 - LLAMA_BUILD_IS_DEV=OFF 미적용" }
+          if ($v -match 'build 0,') { throw "build number 가 0 - git 메타데이터 누락" }
+          if (-not (Test-Path "build\bin\Release\ggml-cuda.dll")) { throw "ggml-cuda.dll 없음" }
+          Add-Content $env:GITHUB_STEP_SUMMARY "- CUDA ${{ matrix.cuda }}: ``$v`` / LLGuidance OK"
+
+      - name: Pack main zip
+        shell: pwsh
+        working-directory: llama.cpp
+        run: |
+          7z a -snl "..\llama-${{ needs.resolve.outputs.version }}-bin-win-cuda-${{ matrix.cuda }}-x64.zip" .\build\bin\Release\*
+
+      - name: Pack CUDA runtime zip
+        shell: pwsh
+        working-directory: llama.cpp
+        run: |
+          # ggml-cuda.dll 은 cudart/cublas 를 동적 링크하므로 런타임 DLL 을 따로 배포해야 한다
+          $dst = '.\build\bin\cudart\'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          foreach ($sub in @('bin', 'lib', 'bin\x64')) {
+            $s = Join-Path "${{ env.CUDA_PATH }}" $sub
+            if (Test-Path $s) { robocopy $s $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll /NJH /NJS /NP | Out-Null }
+          }
+          # robocopy 는 성공해도 0 이 아닌 코드를 반환한다
+          $global:LASTEXITCODE = 0
+          $n = (Get-ChildItem $dst -Filter *.dll).Count
+          if ($n -eq 0) { throw "CUDA 런타임 DLL 을 찾지 못했습니다: ${{ env.CUDA_PATH }}" }
+          Write-Host "cudart DLL: $n"
+          7z a "..\cudart-llama-bin-win-cuda-${{ matrix.cuda }}-x64.zip" "$dst*"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ needs.resolve.outputs.version }}-bin-win-cuda-${{ matrix.cuda }}-x64
+          path: llama-${{ needs.resolve.outputs.version }}-bin-win-cuda-${{ matrix.cuda }}-x64.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cudart-llama-bin-win-cuda-${{ matrix.cuda }}-x64
+          path: cudart-llama-bin-win-cuda-${{ matrix.cuda }}-x64.zip
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Intel / AMD / nVidia 공용 (Vulkan)
+  # --------------------------------------------------------------------------
+  windows-vulkan:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.do_vulkan == 'true' }}
+    runs-on: windows-2022
+    env:
+      VULKAN_VERSION: 1.4.357.0
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Clone llama.cpp ${{ inputs.llama_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$LLAMA_REPO" llama.cpp
+          cd llama.cpp
+          git fetch --tags --force
+          git checkout --detach "${{ inputs.llama_version }}"
+          git log -1 --format='%H %s'
+
+      - name: Setup Node.js (llama-server 웹 UI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          curl.exe -o "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV  "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${env:VULKAN_VERSION}\bin"
+
+      - name: Install Rust (LLGuidance 필수)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Build
+        shell: cmd
+        working-directory: llama.cpp
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DLLAMA_LLGUIDANCE=ON ^
+            -DLLAMA_BUILD_IS_DEV=OFF ^
+            -DGGML_VULKAN=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_CPU_ALL_VARIANTS=ON ^
+            -DGGML_RPC=ON ^
+            -DLLAMA_BUILD_TOOLS=ON ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_BUILD_EXAMPLES=OFF ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_BORINGSSL=ON
+          if errorlevel 1 exit /b 1
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Verify LLGuidance and release version
+        shell: pwsh
+        working-directory: llama.cpp
+        run: |
+          if (-not (Test-Path "build\llguidance\source\target\release\llguidance.lib")) {
+            throw "llguidance.lib 없음 - LLAMA_LLGUIDANCE 가 적용되지 않았습니다"
+          }
+          $v = (& .\build\bin\Release\llama-cli.exe --version 2>&1 | Select-String '^version:').ToString()
+          Write-Host $v
+          if ($v -match '-dev')     { throw "버전에 -dev 가 붙음 - LLAMA_BUILD_IS_DEV=OFF 미적용" }
+          if ($v -match 'build 0,') { throw "build number 가 0 - git 메타데이터 누락" }
+          if (-not (Test-Path "build\bin\Release\ggml-vulkan.dll")) { throw "ggml-vulkan.dll 없음" }
+          Add-Content $env:GITHUB_STEP_SUMMARY "- Vulkan: ``$v`` / LLGuidance OK"
+
+      - name: Pack
+        shell: pwsh
+        working-directory: llama.cpp
+        run: |
+          7z a -snl "..\llama-${{ needs.resolve.outputs.version }}-bin-win-vulkan-x64.zip" .\build\bin\Release\*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ needs.resolve.outputs.version }}-bin-win-vulkan-x64
+          path: llama-${{ needs.resolve.outputs.version }}-bin-win-vulkan-x64.zip
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # (선택) 이 리포지토리에 Release 로 묶어 올린다
+  # --------------------------------------------------------------------------
+  release:
+    needs: [resolve, windows-cuda, windows-vulkan]
+    if: ${{ always() && inputs.create_release && !contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: List
+        run: ls -lh ./artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: llamacpp-${{ needs.resolve.outputs.version }}-llguidance
+          name: llama.cpp ${{ needs.resolve.outputs.version }} (LLGuidance)
+          body: |
+            llama.cpp `${{ needs.resolve.outputs.version }}` (commit `${{ needs.resolve.outputs.commit }}`,
+            업스트림 nightly `${{ needs.resolve.outputs.nightly }}`) 를
+            **LLGuidance 포함**으로 빌드한 Windows x64 배포물입니다.
+
+            빌드 옵션: `-DLLAMA_LLGUIDANCE=ON -DLLAMA_BUILD_IS_DEV=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON`
+
+            | GPU | 받을 파일 |
+            |---|---|
+            | nVidia | `llama-...-bin-win-cuda-12.4-x64.zip` + `cudart-llama-bin-win-cuda-12.4-x64.zip` |
+            | Intel / AMD / nVidia | `llama-...-bin-win-vulkan-x64.zip` |
+
+            CUDA 패키지는 **두 zip 을 같은 폴더에** 풀어야 동작합니다.
+          files: ./artifacts/*.zip
