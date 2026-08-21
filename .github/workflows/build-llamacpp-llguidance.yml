@@ -190,6 +190,62 @@ jobs:
           if (-not (Test-Path "build\bin\Release\ggml-cuda.dll")) { throw "ggml-cuda.dll 없음" }
           Add-Content $env:GITHUB_STEP_SUMMARY "- CUDA ${{ matrix.cuda }}: ``$v`` / LLGuidance OK"
 
+      - name: Smoke test (LLGuidance 실동작 검증)
+        shell: pwsh
+        working-directory: llama.cpp
+        env:
+          TEST_MODEL_URL: "https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q4_0.gguf"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = ".\build\bin\Release"
+
+          # 19MB 초소형 모델(llama.cpp 자체 CI 와 동일). 문법이 출력을 강제하므로 모델 품질은 무관하다.
+          curl.exe -sSL -o test-model.gguf "$env:TEST_MODEL_URL"
+          if (-not (Test-Path test-model.gguf)) { throw "테스트 모델 다운로드 실패" }
+
+          # llama-cli 는 대화형이라 CI 에서 멈춘다. 비대화형인 llama-completion 을 쓴다.
+          # 문법에 공백을 넣으면 SPM 토크나이저의 앞공백 토큰과 충돌하므로 밑줄을 쓴다.
+          $lark = @(
+            '%llguidance {}',
+            '',
+            'start: "llguidance_ok_" NUM',
+            'NUM: /[0-9][0-9]/'
+          )
+          Set-Content -Path test.lark -Value $lark -Encoding ascii
+
+          # LLGuidance 의 문법 위반은 치명적이지 않아 종료코드만으로는 부족하다
+          # (docs/llguidance.md: "Errors are printed to stderr, and generation continues").
+          # 종료코드 + llg error 부재 + 출력 패턴 3가지를 모두 검사한다.
+          function Assert-Llg($out, $code, $pattern, $label) {
+            Write-Host $out
+            if ($code -ne 0) {
+              throw "$label - 종료코드 $code (LLGuidance 미포함이면 GGML_ABORT 로 죽는다)"
+            }
+            if ($out -match 'llg error') { throw "$label - LLGuidance 파서 에러 발생" }
+            # 토큰 경계 때문에 콘솔 출력에 공백이 섞이므로 공백을 제거하고 비교한다
+            $flat = ($out -replace '\s', '')
+            if ($flat -notmatch $pattern) { throw "$label - 출력이 문법에 강제되지 않음 (기대: $pattern)" }
+            Write-Host "OK: $label"
+          }
+
+          Write-Host "--- [1/2] Lark 문법 강제 ---"
+          $out = & "$bin\llama-completion.exe" `
+              -m test-model.gguf --device none -c 512 -n 32 `
+              --grammar-file test.lark -p "Say it." --temp 0 --seed 1 2>&1 | Out-String
+          Assert-Llg $out $LASTEXITCODE 'llguidance_ok_\d\d' "Lark 문법"
+
+          Write-Host "--- [2/2] JSON Schema 강제 ---"
+          # -j 는 LLGuidance 빌드에서 '%llguidance {} / start: %json ...' 로 변환된다
+          # (common/json-schema-to-grammar.cpp:1158-1164).
+          # LLGuidance 의 JSON 모드는 공백을 자유롭게 허용해 15M 모델이 값을 못 끝낼 수 있다.
+          # 반면 여는 '{"ok"' 는 스키마상 강제되므로 그 부분만 검사한다.
+          $schema = '{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}'
+          $out2 = & "$bin\llama-completion.exe" `
+              -m test-model.gguf --device none -c 512 -n 64 `
+              -j $schema -p "Answer." --temp 0 --seed 1 2>&1 | Out-String
+          Assert-Llg $out2 $LASTEXITCODE '\{"ok"' "JSON Schema"
+
+          Add-Content $env:GITHUB_STEP_SUMMARY "- smoke test: Lark + JSON Schema 강제 확인 OK"
       - name: Pack main zip
         shell: pwsh
         working-directory: llama.cpp
@@ -307,6 +363,62 @@ jobs:
           if (-not (Test-Path "build\bin\Release\ggml-vulkan.dll")) { throw "ggml-vulkan.dll 없음" }
           Add-Content $env:GITHUB_STEP_SUMMARY "- Vulkan: ``$v`` / LLGuidance OK"
 
+      - name: Smoke test (LLGuidance 실동작 검증)
+        shell: pwsh
+        working-directory: llama.cpp
+        env:
+          TEST_MODEL_URL: "https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q4_0.gguf"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = ".\build\bin\Release"
+
+          # 19MB 초소형 모델(llama.cpp 자체 CI 와 동일). 문법이 출력을 강제하므로 모델 품질은 무관하다.
+          curl.exe -sSL -o test-model.gguf "$env:TEST_MODEL_URL"
+          if (-not (Test-Path test-model.gguf)) { throw "테스트 모델 다운로드 실패" }
+
+          # llama-cli 는 대화형이라 CI 에서 멈춘다. 비대화형인 llama-completion 을 쓴다.
+          # 문법에 공백을 넣으면 SPM 토크나이저의 앞공백 토큰과 충돌하므로 밑줄을 쓴다.
+          $lark = @(
+            '%llguidance {}',
+            '',
+            'start: "llguidance_ok_" NUM',
+            'NUM: /[0-9][0-9]/'
+          )
+          Set-Content -Path test.lark -Value $lark -Encoding ascii
+
+          # LLGuidance 의 문법 위반은 치명적이지 않아 종료코드만으로는 부족하다
+          # (docs/llguidance.md: "Errors are printed to stderr, and generation continues").
+          # 종료코드 + llg error 부재 + 출력 패턴 3가지를 모두 검사한다.
+          function Assert-Llg($out, $code, $pattern, $label) {
+            Write-Host $out
+            if ($code -ne 0) {
+              throw "$label - 종료코드 $code (LLGuidance 미포함이면 GGML_ABORT 로 죽는다)"
+            }
+            if ($out -match 'llg error') { throw "$label - LLGuidance 파서 에러 발생" }
+            # 토큰 경계 때문에 콘솔 출력에 공백이 섞이므로 공백을 제거하고 비교한다
+            $flat = ($out -replace '\s', '')
+            if ($flat -notmatch $pattern) { throw "$label - 출력이 문법에 강제되지 않음 (기대: $pattern)" }
+            Write-Host "OK: $label"
+          }
+
+          Write-Host "--- [1/2] Lark 문법 강제 ---"
+          $out = & "$bin\llama-completion.exe" `
+              -m test-model.gguf --device none -c 512 -n 32 `
+              --grammar-file test.lark -p "Say it." --temp 0 --seed 1 2>&1 | Out-String
+          Assert-Llg $out $LASTEXITCODE 'llguidance_ok_\d\d' "Lark 문법"
+
+          Write-Host "--- [2/2] JSON Schema 강제 ---"
+          # -j 는 LLGuidance 빌드에서 '%llguidance {} / start: %json ...' 로 변환된다
+          # (common/json-schema-to-grammar.cpp:1158-1164).
+          # LLGuidance 의 JSON 모드는 공백을 자유롭게 허용해 15M 모델이 값을 못 끝낼 수 있다.
+          # 반면 여는 '{"ok"' 는 스키마상 강제되므로 그 부분만 검사한다.
+          $schema = '{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}'
+          $out2 = & "$bin\llama-completion.exe" `
+              -m test-model.gguf --device none -c 512 -n 64 `
+              -j $schema -p "Answer." --temp 0 --seed 1 2>&1 | Out-String
+          Assert-Llg $out2 $LASTEXITCODE '\{"ok"' "JSON Schema"
+
+          Add-Content $env:GITHUB_STEP_SUMMARY "- smoke test: Lark + JSON Schema 강제 확인 OK"
       - name: Pack
         shell: pwsh
         working-directory: llama.cpp

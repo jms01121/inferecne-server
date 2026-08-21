@@ -81,12 +81,29 @@ llama.cpp 는 같은 커밋에 태그를 **두 개** 붙인다.
 -DLLAMA_BUILD_BORINGSSL=ON   HTTPS(모델 URL 다운로드) 지원
 ```
 
-워크플로는 빌드 후 다음을 **자동 검증**하고, 실패하면 zip 을 만들지 않는다.
+워크플로는 빌드 후 다음을 **자동 검증**하고, 하나라도 실패하면 zip 을 만들지 않는다.
 
+**정적 검증**
 - `llguidance.lib` 존재 → LLGuidance 가 실제로 링크됨
 - `llama-cli --version` 에 `-dev` 없음 → 릴리스 빌드
 - `build 0, commit unknown` 아님 → git 메타데이터 정상
 - 백엔드 DLL(`ggml-cuda.dll` / `ggml-vulkan.dll`) 존재
+
+**스모크 테스트** — 19MB 초소형 모델(`stories15M-q4_0`)을 받아 실제로 돌린다. GPU 없이 CPU 로만 수행.
+
+| 검사 | 내용 |
+|---|---|
+| Lark 문법 | `%llguidance` 문법으로 출력이 `llguidance_ok_NN` 으로 강제되는지 |
+| JSON Schema | `-j` 가 LLGuidance 를 타서 `{"ok"` 를 강제하는지 |
+
+각각 **종료코드 0 + `llg error` 부재 + 출력 패턴 일치** 세 가지를 모두 본다.
+LLGuidance 가 빠진 빌드는 `%llguidance` 문법에서 `GGML_ABORT` 로 즉사하므로 첫 조건에서 걸린다.
+
+> 구현 메모 — 로컬 검증에서 발견한 함정들:
+> - `llama-cli` 는 대화형이라 CI 에서 멈춘다 → **`llama-completion`** 사용
+> - 문법 문자열에 공백을 넣으면 SPM 토크나이저의 앞공백 토큰과 충돌 → 밑줄 사용
+> - LLGuidance 문법 위반은 치명적이지 않아 종료코드만으로는 못 잡는다 → `llg error` 문자열도 검사
+> - JSON 모드는 공백을 자유롭게 허용해 작은 모델이 값을 못 끝낼 수 있다 → 강제되는 앞부분만 검사
 
 ## 받은 zip 검증
 
