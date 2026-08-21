@@ -29,6 +29,11 @@ on:
           - cuda-12.4
           - cuda-13.3
           - vulkan
+      cuda_arch:
+        description: "CUDA 아키텍처 목록 (비우면 llama.cpp 기본값). 예: 50-virtual;61-virtual;70-virtual;86-real;89-real"
+        required: false
+        default: ""
+        type: string
       create_release:
         description: "이 리포지토리에 GitHub Release 를 만들고 zip 을 첨부"
         required: false
@@ -159,10 +164,15 @@ jobs:
           rem CUDA 12.4 는 CCCL 3.2 를 따로 받아야 한다 (13.x 는 불필요)
           set "CUB_OPT="
           if "${{ matrix.cuda }}"=="12.4" set "CUB_OPT=-DGGML_CUDA_CUB_3DOT2=ON"
+          rem 아키텍처를 지정하면 빌드 시간과 DLL 크기가 줄어든다.
+          rem 비우면 llama.cpp 기본값(툴킷 버전에 따라 자동 선택)을 쓴다.
+          set "ARCH_OPT="
+          if not "${{ inputs.cuda_arch }}"=="" set "ARCH_OPT=-DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }}"
+          echo ARCH_OPT=%ARCH_OPT%
           cmake -S . -B build -G "Ninja Multi-Config" ^
             -DLLAMA_LLGUIDANCE=ON ^
             -DLLAMA_BUILD_IS_DEV=OFF ^
-            -DGGML_CUDA=ON %CUB_OPT% ^
+            -DGGML_CUDA=ON %CUB_OPT% %ARCH_OPT% ^
             -DGGML_NATIVE=OFF ^
             -DGGML_BACKEND_DL=ON ^
             -DGGML_CPU_ALL_VARIANTS=ON ^
