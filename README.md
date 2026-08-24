@@ -8,14 +8,39 @@ Windows x64 배포 zip 을 만드는 GitHub Actions 리포지토리.
 llama.cpp 공식 릴리스 zip 에는 LLGuidance 가 들어 있지 않다.
 `LLAMA_LLGUIDANCE` 옵션이 기본 `OFF` 이고 업스트림 릴리스 워크플로도 이 옵션을 켜지 않는다.
 
-그리고 LLGuidance 는 **백엔드 DLL 이 아니라 실행파일에 정적 링크**된다.
+그리고 LLGuidance 는 **백엔드 DLL 이 아니라 `llama-common.dll` 에 정적 링크**된다.
 
 ```
-llguidance (Rust 정적 lib) -> llama-common -> llama-cli.exe / llama-server.exe
-ggml-cuda.dll / ggml-vulkan.dll  <- LLGuidance 와 무관
+llguidance (Rust 정적 lib)
+      | 정적 링크
+llama-common.dll                  <- 여기 (실측 +5.5MB)
+      | 동적 링크
+llama-cli.exe / llama-server.exe / ...
+
+ggml-cuda.dll / ggml-vulkan.dll   <- LLGuidance 와 완전 무관
 ```
 
-따라서 공식 zip 에 DLL 만 갈아끼우는 방식으로는 안 되고, 실행파일을 새로 빌드해야 한다.
+같은 커밋(b10485)의 공식 빌드와 비교한 실측값:
+
+```
+llama-common.dll   공식 8,077,824 -> 이 빌드 13,590,016   (+5,512,192)
+```
+
+따라서 공식 zip 에 백엔드 DLL 만 갈아끼우는 방식으로는 안 되고, `llama-common.dll` 과
+그것을 쓰는 실행파일들을 새로 빌드해야 한다.
+
+### 재빌드가 필요한 범위
+
+`GGML_BACKEND_DL=ON` 이라 백엔드는 런타임에 로드되는 독립 DLL 이다. 양방향으로 재사용이 된다.
+
+| 바뀐 것 | 재빌드 대상 | CUDA 커널 재컴파일 |
+|---|---|---|
+| LLGuidance 옵션, 앱/서버 코드 | `llama-common.dll` + exe | ❌ 불필요 |
+| ggml/CUDA 커널, CUDA 툴킷 버전 | `ggml-cuda.dll` | ✅ 필요 |
+
+단, **CUDA 를 처음부터 빌드해야 하는 상황이면 이 분리로 시간이 줄지 않는다.**
+4~6시간의 대부분이 nvcc 의 아키텍처별 커널 컴파일이고, exe/CPU variant/BoringSSL/llguidance 를
+다 합쳐도 20~40분 수준이다. 그 경우엔 `cuda_arch` 로 아키텍처를 줄이는 것이 유일한 해법이다.
 
 ## 사용법
 
