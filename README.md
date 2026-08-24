@@ -105,6 +105,30 @@ LLGuidance 가 빠진 빌드는 `%llguidance` 문법에서 `GGML_ABORT` 로 즉�
 > - LLGuidance 문법 위반은 치명적이지 않아 종료코드만으로는 못 잡는다 → `llg error` 문자열도 검사
 > - JSON 모드는 공백을 자유롭게 허용해 작은 모델이 값을 못 끝낼 수 있다 → 강제되는 앞부분만 검사
 
+## 빌드 프로버넌스 (공급망 검증)
+
+빌드된 zip 마다 **어느 리포지토리·커밋·워크플로에서 나왔는지** 서명된 증명서가 붙는다
+(`actions/attest-build-provenance`, Sigstore 기반). 보안 심사에서 공급망 관련 확인을 요구할 때 쓴다.
+
+```bash
+gh attestation verify llama-v0.1.2-bin-win-vulkan-x64.zip --repo jms01121/inferecne-server
+```
+
+통과하면 해당 zip 이 이 리포지토리의 워크플로에서 생성된 것이 암호학적으로 증명된다.
+누가 중간에 바꿔치기했거나 다른 곳에서 만든 파일이면 검증에 실패한다.
+
+인터넷이 차단된 환경에서는 번들을 미리 받아두고 오프라인 검증도 가능하다:
+
+```bash
+gh attestation download llama-v0.1.2-bin-win-vulkan-x64.zip --repo jms01121/inferecne-server
+gh attestation verify llama-v0.1.2-bin-win-vulkan-x64.zip --repo jms01121/inferecne-server \
+  --bundle llama-v0.1.2-bin-win-vulkan-x64.zip.jsonl
+```
+
+> `cudart-*.zip` 에도 증명서가 붙지만, 그 내용물은 NVIDIA CUDA Toolkit 재배포 DLL 을
+> 그대로 복사한 것이라 공식 llama.cpp 릴리스의 같은 파일과 **바이트 단위로 동일**하다.
+> (b10485 공식 zip 과 MD5 일치 확인함)
+
 ## 받은 zip 검증
 
 ```bat

@@ -116,6 +116,11 @@ jobs:
     needs: resolve
     if: ${{ needs.resolve.outputs.cuda_matrix != '[]' }}
     runs-on: windows-2022
+    # 빌드 프로버넌스 서명에 필요 (OIDC 토큰 + attestation 기록)
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -280,6 +285,15 @@ jobs:
           Write-Host "cudart DLL: $n"
           7z a "..\cudart-llama-bin-win-cuda-${{ matrix.cuda }}-x64.zip" "$dst*"
 
+      # 이 zip 이 어느 소스/워크플로/커밋에서 나왔는지 서명된 증명서를 남긴다.
+      # 검증: gh attestation verify <zip> --repo ${{ github.repository }}
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            llama-${{ needs.resolve.outputs.version }}-bin-win-cuda-${{ matrix.cuda }}-x64.zip
+            cudart-llama-bin-win-cuda-${{ matrix.cuda }}-x64.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: llama-${{ needs.resolve.outputs.version }}-bin-win-cuda-${{ matrix.cuda }}-x64
@@ -299,6 +313,10 @@ jobs:
     needs: resolve
     if: ${{ needs.resolve.outputs.do_vulkan == 'true' }}
     runs-on: windows-2022
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       VULKAN_VERSION: 1.4.357.0
 
@@ -434,6 +452,11 @@ jobs:
         working-directory: llama.cpp
         run: |
           7z a -snl "..\llama-${{ needs.resolve.outputs.version }}-bin-win-vulkan-x64.zip" .\build\bin\Release\*
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: llama-${{ needs.resolve.outputs.version }}-bin-win-vulkan-x64.zip
 
       - uses: actions/upload-artifact@v4
         with:
