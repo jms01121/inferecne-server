@@ -49,7 +49,7 @@ llama-common.dll   공식 8,077,824 -> 이 빌드 13,590,016   (+5,512,192)
 | 입력 | 기본값 | 설명 |
 |---|---|---|
 | `llama_version` | `v0.1.2` | llama.cpp 릴리스 태그. nightly 태그(`b10485`)나 커밋 SHA 도 가능 |
-| `targets` | `all` | `all` / `cuda-12.4` / `cuda-13.3` / `vulkan` |
+| `targets` | `all` | `all` / `cuda-12.4` / `cuda-13.3` / `vulkan` / `cpu` |
 | `create_release` | `false` | 켜면 이 리포지토리에 Release 를 만들고 zip 을 첨부 |
 
 CLI:
@@ -69,6 +69,7 @@ gh run watch
 | nVidia | `llama-v0.1.2-bin-win-cuda-12.4-x64.zip` + `cudart-llama-bin-win-cuda-12.4-x64.zip` |
 | nVidia (CUDA 13) | `llama-v0.1.2-bin-win-cuda-13.3-x64.zip` + `cudart-llama-bin-win-cuda-13.3-x64.zip` |
 | Intel / AMD / nVidia | `llama-v0.1.2-bin-win-vulkan-x64.zip` |
+| GPU 없음 (CPU 전용) | `llama-v0.1.2-bin-win-cpu-x64.zip` |
 
 **CUDA 패키지는 본체 zip 과 `cudart-*` zip 을 같은 폴더에 풀어야 동작한다.**
 `ggml-cuda.dll` 이 `cudart64_*.dll` / `cublas64_*.dll` 을 동적 링크하기 때문이다.
@@ -112,7 +113,7 @@ llama.cpp 는 같은 커밋에 태그를 **두 개** 붙인다.
 - `llguidance.lib` 존재 → LLGuidance 가 실제로 링크됨
 - `llama-cli --version` 에 `-dev` 없음 → 릴리스 빌드
 - `build 0, commit unknown` 아님 → git 메타데이터 정상
-- 백엔드 DLL(`ggml-cuda.dll` / `ggml-vulkan.dll`) 존재
+- 백엔드 DLL(`ggml-cuda.dll` / `ggml-vulkan.dll` / `ggml-cpu-*.dll`) 존재
 
 **스모크 테스트** — 19MB 초소형 모델(`stories15M-q4_0`)을 받아 실제로 돌린다. GPU 없이 CPU 로만 수행.
 
